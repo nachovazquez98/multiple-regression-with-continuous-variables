@@ -36,9 +36,7 @@ import seaborn as sns
 from sklearn.preprocessing import StandardScaler
 from sklearn.preprocessing import RobustScaler
 from sklearn.preprocessing import MinMaxScaler
-
 import matplotlib
-
 from sklearn.datasets import make_regression
 from sklearn.feature_selection import SelectKBest
 from sklearn.feature_selection import f_regression
@@ -141,6 +139,8 @@ print(high_corr.sort_values(ascending=False))
 columns_high_corr = list(high_corr.sort_values(ascending=False).to_frame().index)
 #plot
 sns.pairplot(df1, x_vars=columns_high_corr, y_vars=["out"], height=5, aspect=.8, kind="reg")
+#for column in columns_high_corr:
+#    sns.jointplot(data = df1, x =column, y ="out")
 
 
 # %%
@@ -153,7 +153,7 @@ columns_low_corr = list(df_low_corr.index)
 
 
 # %%
-#se eliminan las columnas con poca correlacion
+#se eliminan las columnas con poca correlacion (Opcional)
 df_highcorr = df1.drop(df1[columns_low_corr],axis=1)
 df_highcorr.shape
 
@@ -167,6 +167,8 @@ df_highcorr.shape
 
 
 # %%
+#Elije el dataset completo o solo las columnas con alta correlacion
+
 #X = df1.loc[:, df1.columns != 'out']
 #y = df1.loc[:, df1.columns == 'out'].values.ravel()
 X = df_highcorr.loc[:, df_highcorr.columns != 'out']
@@ -183,45 +185,46 @@ X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.33, random
 
 # %%
 #Tune the Number of Selected Features
+def RKFold(X,y):
+    # define the evaluation method
+    cv = RepeatedKFold(n_splits=10, n_repeats=3, random_state=1)
+    # define the pipeline to evaluate
+    model = LinearRegression()
+    fs = SelectKBest(score_func=mutual_info_regression)
+    pipeline = Pipeline(steps=[('sel',fs), ('lr', model)])
+    # define the grid
+    grid = dict()
+    grid['sel__k'] = [i for i in range(X.shape[1]-20, X.shape[1]+1)]
+    # define the grid search
+    search = GridSearchCV(pipeline, grid, scoring='neg_mean_squared_error', n_jobs=-1, cv=cv)
+    # perform the search
+    results = search.fit(X, y)
+    # summarize best
+    print('Best MAE: %.5f' % results.best_score_)
+    print('Best Config: %s' % results.best_params_)
+    # summarize all
+    means = results.cv_results_['mean_test_score']
+    params = results.cv_results_['params']
+    for mean, param in zip(means, params):
+        print(">%.5f with: %r" % (mean, param))
+    return results.best_params_['sel__k']
 
-# define the evaluation method
-cv = RepeatedKFold(n_splits=10, n_repeats=3, random_state=1)
-# define the pipeline to evaluate
-model = LinearRegression()
-fs = SelectKBest(score_func=mutual_info_regression)
-pipeline = Pipeline(steps=[('sel',fs), ('lr', model)])
-# define the grid
-grid = dict()
-grid['sel__k'] = [i for i in range(X.shape[1]-20, X.shape[1]+1)]
-# define the grid search
-search = GridSearchCV(pipeline, grid, scoring='neg_mean_squared_error', n_jobs=-1, cv=cv)
-# perform the search
-results = search.fit(X, y)
-# summarize best
-print('Best MAE: %.5f' % results.best_score_)
-print('Best Config: %s' % results.best_params_)
-# summarize all
-means = results.cv_results_['mean_test_score']
-params = results.cv_results_['params']
-for mean, param in zip(means, params):
-    print(">%.5f with: %r" % (mean, param))
+best_params = RKFold(X,y)
 
 
 # %%
 # feature selection
-def select_features(X_train, y_train, X_test):
-	# configure to select a subset of features
-	fs = SelectKBest(score_func=mutual_info_regression, k=results.best_params_['sel__k'])
-	# learn relationship from training data
-	fs.fit(X_train, y_train)
-	# transform train input data
-	X_train_fs = fs.transform(X_train)
-	# transform test input data
-	X_test_fs = fs.transform(X_test)
-	return X_train_fs, X_test_fs, fs
+def select_features(best_params, X, y):
+    fs = SelectKBest(score_func=mutual_info_regression, k=best_params)
+    # learn relationship from training data
+    fs.fit(X,y)
+    cols = fs.get_support(indices=True)
+    X_fs = X.iloc[:,cols]
+    X_train_fs, X_test_fs, y_train, y_test = train_test_split(X_fs, y, test_size=0.33, random_state=1)
+    return X_train_fs, X_test_fs, fs, X_fs
 
 # feature selection
-X_train_fs, X_test_fs, fs = select_features(X_train, y_train, X_test)
+X_train_fs, X_test_fs, fs, X_fs= select_features(best_params, X, y)
 
 # %% [markdown]
 # Model Selection: realizamos el entrenamiento utilizando varios modelos de regresión diferentes
@@ -283,7 +286,7 @@ for i, classifier in enumerate(classifiers):
 # %%
 minl = []
 for dicts in class_list:
-    #print(dicts['name'])
+    print(dicts['name'],':',dicts['mae'])
     minl.append(dicts['mae'])
 
 min_mae = min(minl)
@@ -295,6 +298,7 @@ def return_best_mae(class_list, min_mae):
 
 best_mae = return_best_mae(class_list, min_mae)
 print(best_mae)
+#with best model do a hiperparameter tuning
 
 
 # %%
@@ -349,16 +353,29 @@ WITH ALL DATA (no correlation or feature selection)
 # Graficamos los resultados
 
 # %%
-#Residual Analysis
+#learning curve
+def plot_learning_curves(model, X, y):
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.33, random_state=1)
 
-y_train_price = best_mae['model'].predict(X_train_fs)
-#y_train_price = best_mae['model'].predict(X_train)
+    scaler = StandardScaler().fit(X_train)
+    X_train_scaled = pd.DataFrame(scaler.transform(X_train),columns = X.columns)
+    X_val_scaled = pd.DataFrame(scaler.transform(X_val),columns = X.columns)
 
-#plot
-fig = plt.figure()
-sns.distplot((y_train - y_train_price), bins = 20)
-fig.suptitle('Error Terms', fontsize = 20)        
-plt.xlabel('Errors', fontsize = 18)    
+    train_errors, val_errors = [], []
+    for m in range(1, len(X_train_scaled)):
+        model.fit(X_train_scaled[:m], y_train[:m])
+        y_train_predict = model.predict(X_train_scaled[:m])
+        y_val_predict = model.predict(X_val_scaled)
+        train_errors.append(metrics.mean_absolute_error(y_train[:m], y_train_predict))
+        val_errors.append(metrics.mean_absolute_error(y_val, y_val_predict))
+    plt.plot(np.sqrt(train_errors), "r-+", linewidth=2, label="train")
+    plt.plot(np.sqrt(val_errors), "b-", linewidth=3, label="val")
+    plt.legend()
+#con feature selection
+plot_learning_curves(model = linear_model.Ridge(), X = X_fs, y = y)
+
+#sin feature selection
+#plot_learning_curves(model = linear_model.Ridge(), X = X, y = y)
 
 
 # %%
@@ -367,7 +384,6 @@ plt.xlabel('Errors', fontsize = 18)
 fs_index = fs.get_support(indices=True)
 fs_columns = X.iloc[:,fs_index].columns
 coef = pd.Series(best_mae['model'].coef_, index = fs_columns)
-
 #coef = pd.Series(best_mae['model'].coef_, index = X.columns)
 
 imp_coef = coef.sort_values()
@@ -381,10 +397,91 @@ high_corr.sort_values(ascending=False)
 
 
 # %%
+#Residual Analysis
+
+y_train_price = best_mae['model'].predict(X_train_fs)
+#y_train_price = best_mae['model'].predict(X_train)
+
+#plot
+fig = plt.figure()
+sns.distplot((y_train - y_train_price), bins = 20)
+fig.suptitle('Error Terms', fontsize = 20)        
+plt.xlabel('Errors', fontsize = 18)    
+
+
+# %%
 plt.plot(y_test - best_mae['y_pred'],marker='o',linestyle='')
 plt.title("Prediction Errors")
 plt.legend()
 plt.show() 
+
+
+# %%
+#Hyperparameter CV best model
+
+
+# %%
+#y_train, y_test
+
+# feature selection
+#X_fs,y
+#X_train_fs, X_test_fs, fs
+final_X_train = X_train_fs.copy()
+final_X_test = X_test_fs.copy()
+
+#No feature selection
+#X, y
+#X_train, X_test
+#final_X_train = X_train.copy()
+#final_X_test = X_test.copy()
+
+from sklearn.linear_model import RidgeCV
+# define model evaluation method
+cv = RepeatedKFold(n_splits=10, n_repeats=3, random_state=1)
+# define model
+model = RidgeCV(alphas=np.arange(0, 1, 0.01), cv=cv, scoring='neg_mean_absolute_error')
+
+scaler = StandardScaler().fit(final_X_train)
+X_train_scaled = pd.DataFrame(scaler.transform(final_X_train),columns = final_X_train.columns)
+X_test_scaled = pd.DataFrame(scaler.transform(final_X_test),columns = final_X_test.columns)
+
+# fit model
+model.fit(X_train_scaled, y_train)
+y_pred_ridge = model.predict(X_test_scaled)
+# MEA results
+mae_ridge = metrics.mean_absolute_error(y_test, y_pred_ridge)
+print(mae_ridge)
+
+
+# %%
+import shap
+
+explainer = shap.KernelExplainer(model.predict, X_train_scaled)
+shap_values = explainer.shap_values(X_test_scaled)
+
+
+# %%
+shap.summary_plot(shap_values, X_test_scaled)
+shap.summary_plot(shap_values, X_test_scaled, plot_type="bar")
+
+
+# %%
+shap.initjs()
+shap.dependence_plot("Mp", shap_values, X_test_scaled)
+
+
+# %%
+shap.initjs()
+shap.force_plot(explainer.expected_value,shap_values[10,:], X_test_scaled.iloc[10,:])
+
+
+# %%
+y_test[10]
+
+
+# %%
+shap.initjs()
+shap.force_plot(explainer.expected_value, shap_values, X_test_scaled)
 
 
 # %%
